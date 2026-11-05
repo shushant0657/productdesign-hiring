@@ -954,9 +954,47 @@ function loadScript(src){return new Promise((ok,no)=>{const s=document.createEle
 async function pdfText(file){
   if(!window.pdfjsLib){await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js");await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js");
     window.pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";}
-  const doc=await window.pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;let out="";
-  for(let i=1;i<=Math.min(doc.numPages,6);i++){const pg=await doc.getPage(i);const tc=await pg.getTextContent();out+=tc.items.map(x=>x.str).join(" ")+"\n";}
-  return out;}
+  const doc=await window.pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;let out="";const links=[];
+  for(let i=1;i<=Math.min(doc.numPages,6);i++){const pg=await doc.getPage(i);const tc=await pg.getTextContent();out+=tc.items.map(x=>x.str+(x.hasEOL?"\n":" ")).join("")+"\n";
+    try{(await pg.getAnnotations()).forEach(a=>{if(a&&a.url)links.push(a.url);});}catch(e){}}
+  pdfText.links=links;return out;}
+// No-Claude resume reader (GitHub Pages): pulls contact details, links, title, years and known companies from the text.
+function parseResumeLocal(text,fileName,annLinks){
+  const t=String(text||""),low=t.toLowerCase();
+  const email=(t.match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/)||[""])[0].replace(/\.$/,"");
+  const phm=t.replace(/[()]/g," ").match(/(?:\+?91[\s-]*)?[6-9]\d(?:[\s-]?\d){8}\b/);const phone=phm?phm[0].replace(/\D/g,"").slice(-10):"";
+  const urls=[...(annLinks||[]),...(t.match(/(?:https?:\/\/|www\.)[^\s)>\]"',]+|\b[\w-]+(?:\.[\w-]+)*\.(?:com|in|io|me|co|site|website|design|app|ai|xyz|net|page|framer\.website|webflow\.io|notion\.site)(?:\/[^\s)>\]"',]*)?/gi)||[])]
+    .map(u=>u.replace(/[.;:]+$/,"")).filter(u=>!/@/.test(u)&&!/^mailto:|^tel:/i.test(u)&&!(email&&email.toLowerCase().includes(u.toLowerCase())));
+  const norm=u=>/^https?:/i.test(u)?u:"https://"+u;
+  const uniq=[...new Set(urls.map(norm))];
+  const isSoc=u=>/linkedin\.com|github\.com|twitter\.com|x\.com\/|instagram\.com|medium\.com|gmail\.com|google\.com\/(?!.*drive)|calendly|wa\.me|youtube/i.test(u);
+  const linkedin=uniq.find(u=>/linkedin\.com/i.test(u))||"";
+  const own=uniq.filter(u=>!isSoc(u)&&!/behance\.net|dribbble\.com|drive\.google|docs\.google/i.test(u));
+  const portfolio=own[0]||uniq.find(u=>/dribbble\.com/i.test(u))||uniq.find(u=>/behance\.net/i.test(u))||uniq.find(u=>/drive\.google|docs\.google/i.test(u))||"";
+  const lines=t.split(/\n+/).map(l=>l.replace(/\s+/g," ").trim()).filter(Boolean);
+  const bad=/resume|curriculum|vitae|designer|design|portfolio|profile|summary|contact|experience|@|\d|www|http|linkedin|phone|email|india|bangalore|bengaluru|mumbai|delhi|pune|hyderabad|gurgaon|noida/i;
+  let name=(lines.slice(0,8).find(l=>/^[A-Za-z][A-Za-z.' -]{2,40}$/.test(l)&&l.split(" ").length>=1&&l.split(" ").length<=4&&!bad.test(l))||"");
+  if(!name){const f=String(fileName||"").replace(/\.[a-z]+$/i,"").replace(/[_\-.]+/g," ").replace(/\b(resume|cv|portfolio|product|ux|ui|designer|design|final|updated|new|\d+)\b/gi,"").replace(/\s+/g," ").trim();if(/^[A-Za-z][A-Za-z ]{2,40}$/.test(f))name=f;}
+  name=name.replace(/\s+/g," ").trim();if(name===name.toUpperCase()||name===name.toLowerCase())name=name.toLowerCase().replace(/\b\w/g,c=>c.toUpperCase());
+  const rm=t.match(/\b((?:senior|sr\.?|lead|principal|staff|associate|junior|jr\.?)\s+)?(product|ux|ui|ui\s*\/\s*ux|ux\s*\/\s*ui|visual|interaction|experience)\s+designer(\s+(?:i{1,3}|[1-3]))?\b/i);
+  const role=rm?rm[0].replace(/\s+/g," ").replace(/\b\w/g,c=>c.toUpperCase()).replace(/\bUx\b/g,"UX").replace(/\bUi\b/g,"UI"):"";
+  const ym=low.match(/(\d{1,2}(?:\.\d)?)\s*\+?\s*(?:years?|yrs?)(?:\s+of)?(?:\s+\w+){0,3}?\s+(?:experience|exp\b)/)||low.match(/experience\s*(?:of|:|-)?\s*(\d{1,2}(?:\.\d)?)\s*\+?\s*(?:years?|yrs?)/);
+  const totalYrs=ym&&+ym[1]<40?+ym[1]:"";
+  // known companies by first mention (resumes list newest first)
+  const all=[...new Set([...KW.flatMap(([,ks])=>ks),...TOPB,...KNOWNB])].map(k=>k.trim()).filter(k=>k.length>=3);
+  const hits=[];all.forEach(k=>{const re=new RegExp("(^|[^a-z])"+k.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+"(?![a-z])","i");const m=re.exec(t);if(m)hits.push({k,i:m.index+m[1].length,len:k.length});});
+  hits.sort((a,b)=>a.i-b.i||b.len-a.len);
+  const seen=[];hits.forEach(h=>{if(!seen.some(x=>x.i<=h.i&&h.i<x.i+x.len))seen.push(h);});
+  const cos=seen.slice(0,6).map(h=>t.substr(h.i,h.len));
+  const company=cos[0]||"";
+  const doms=cos.map(guessDomain).filter(Boolean);const rank=["qcomm","ecomm","adjacent","b2c","agency","b2b"];
+  const domain=doms.sort((a,b)=>rank.indexOf(a)-rank.indexOf(b))[0]||"";
+  const brandTier=cos.some(c=>guessBrand(c)==="top")?"top":cos.some(c=>guessBrand(c)==="known")?"known":"";
+  const FL={home:/home\s*(page|screen|feed)|merchandis|homepage/,search:/search|discovery|listing|plp/,pdp:/product detail|pdp/,cart:/cart|checkout/,pay:/payment|upi|wallet/,slot:/delivery slot|slot/,track:/order tracking|track(ing)? order|live tracking/,returns:/returns?|refund/,loyalty:/loyalty|membership|rewards|subscription/};
+  const flows=Object.keys(FL).filter(k=>FL[k].test(low));
+  return {name,email,phone,location:"",institute:"",company,role,currentCtc:"",expectedCtc:"",notice:"",portfolio,resume:"",totalYrs,domain,ecomYrs:"",brandTier,flows,
+    craft:0,process:0,impact:0,mobileScale:false,designSystem:/design system/.test(low),source:"Resume upload",status:"New",createdAt:new Date().toISOString(),pastCompanies:cos,_local:true,
+    notes:`Added from resume file "${fileName}" (read in the browser, not by Claude).`+(linkedin?` LinkedIn: ${linkedin}.`:"")+(cos.length?` Companies mentioned: ${cos.join(", ")}.`:"")+" Check B2C years and ratings from the resume."};}
 async function sheetRows(file){
   if(/\.csv$/i.test(file.name)||file.type==="text/csv")return parseCSV(await file.text());
   if(!window.XLSX)await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
@@ -965,7 +1003,7 @@ async function sheetRows(file){
 
 // modal state
 let imp={mode:"paste",items:[],busy:false,ctl:null,prog:null,err:""};
-function openImport(){imp={mode:"paste",items:[],busy:false,ctl:null,prog:null,err:"",paste:"",file:null};$("#imp").hidden=false;document.body.style.overflow="hidden";renderImp();setTimeout(()=>$("#impPaste")?.focus(),0);}
+function openImport(){imp={mode:"paste",items:[],busy:false,ctl:null,prog:null,err:"",paste:"",file:null,files:[]};$("#imp").hidden=false;document.body.style.overflow="hidden";renderImp();setTimeout(()=>$("#impPaste")?.focus(),0);}
 function closeImport(){if(imp.ctl)imp.ctl.abort();$("#imp").hidden=true;document.body.style.overflow="";}
 $("#impClose").onclick=closeImport;
 $("#imp").addEventListener("click",e=>{if(e.target.id==="imp"&&!imp.busy)closeImport();});
@@ -983,13 +1021,13 @@ function renderImp(){
     <div class="src">
       <button class="srcb" data-mode="paste" aria-pressed="${imp.mode==="paste"}"><span class="ic">${IC.paste}</span><b>Paste info</b><span>Rows copied from a sheet, or any text about a candidate</span></button>
       <button class="srcb" data-mode="sheet" aria-pressed="${imp.mode==="sheet"}"><span class="ic">${IC.sheet}</span><b>Upload a sheet</b><span>Form responses as .csv or .xlsx</span></button>
-      ${STATIC?"":`<button class="srcb" data-mode="resume" aria-pressed="${imp.mode==="resume"}"><span class="ic">${IC.resume}</span><b>Upload a resume</b><span>One PDF; Claude reads it and scores the person</span></button>`}
+      <button class="srcb" data-mode="resume" aria-pressed="${imp.mode==="resume"}"><span class="ic">${IC.resume}</span><b>Upload resumes</b><span>${STATIC?"One or more PDFs; details are pulled out and checked against your list":"One PDF; Claude reads it and scores the person"}</span></button>
     </div>
     ${imp.mode==="paste"?`<textarea class="paste" id="impPaste" placeholder="Paste rows straight from Google Sheets or Excel, with or without the header row.">${esc(imp.paste||"")}</textarea>
       <span class="muted" style="font-size:12px">Rows are matched to columns automatically. Include the header row if you have it.</span>`:
-     `<label class="drop" id="impDrop">${IC[imp.mode]}<b>${imp.file?esc(imp.file.name):imp.mode==="sheet"?"Drop a .csv or .xlsx here":"Drop a resume PDF here"}</b>
+     `<label class="drop" id="impDrop">${IC[imp.mode]}<b>${imp.files&&imp.files.length>1?imp.files.length+" resumes selected":imp.file?esc(imp.file.name):imp.mode==="sheet"?"Drop a .csv or .xlsx here":"Drop resume PDFs here"}</b>
         <span class="muted" style="font-size:12px">${imp.file?"Ready to process":"or click to choose a file"}</span>
-        <input type="file" id="impFile" accept="${imp.mode==="sheet"?".csv,.xlsx,.xls,text/csv":".pdf,.txt,application/pdf"}"></label>`}
+        <input type="file" id="impFile" ${imp.mode==="resume"&&STATIC?"multiple":""} accept="${imp.mode==="sheet"?".csv,.xlsx,.xls,text/csv":".pdf,.txt,application/pdf"}"></label>`}
     ${prog}${imp.err?`<div class="note err">${esc(imp.err)}</div>`:""}`;
   F.innerHTML=`<button class="linkbtn" id="impManual">Or enter one applicant by hand</button>
     <div class="row">${imp.busy?`<button class="btn" id="impStop">Stop</button>`:""}<button class="btn primary" id="impGo" ${imp.busy?"disabled":""}>${imp.busy?"Working…":"Process"}</button></div>`;
@@ -1004,8 +1042,8 @@ function renderReview(){
   const row=x=>{const a=x.a,i=imp.items.indexOf(a);return `<tr>
     <td><input type="checkbox" data-i="${i}" ${a._sel?"checked":""} aria-label="Select ${esc(a.name)}"></td>
     <td><span class="badge num b-${x.v}" style="width:36px;height:36px;font-size:15px">${x.s.total}</span></td>
-    <td><b>${esc(a.name||"Unnamed")}</b>${a._dupOf?` <span class="tag y">Already in list · will update</span>`:""}${a.resumeChecked?` <span class="tag g">Resume read</span>`:""}
-      <div class="small">${esc([a.role,a.company].filter(Boolean).join(" · ")||"—")}</div>${x.ex?`<div class="why">${esc(excludeReason(a))}</div>`:a.resumeSummary?`<div class="small" style="max-width:46ch">${esc(a.resumeSummary)}</div>`:""}</td>
+    <td>${a._local?`<input class="mini" style="width:170px" data-ctc="${i}" data-k="name" value="${esc(a.name)}" placeholder="Name" aria-label="Name">`:`<b>${esc(a.name||"Unnamed")}</b>`}${a._dupOf?` <span class="tag y">Already in list${(()=>{const d=cands.find(c=>c.id===a._dupOf);return d&&d.status?" ("+esc(d.status)+")":"";})()} · will update</span>`:a._local?` <span class="tag g">New applicant</span>`:""}${a.resumeChecked?` <span class="tag g">Resume read</span>`:""}
+      ${a._local?`<div class="small" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px"><input class="mini" style="width:150px" data-ctc="${i}" data-k="company" value="${esc(a.company)}" placeholder="Current company" aria-label="Company"><input class="mini" style="width:200px" data-ctc="${i}" data-k="portfolio" value="${esc(a.portfolio)}" placeholder="Portfolio link" aria-label="Portfolio"></div><div class="small">${esc([a.role,a.email,a.phone].filter(Boolean).join(" · ")||"—")}</div>`:`<div class="small">${esc([a.role,a.company].filter(Boolean).join(" · ")||"—")}</div>`}${x.ex?`<div class="why">${esc(excludeReason(a))}</div>`:a.resumeSummary?`<div class="small" style="max-width:46ch">${esc(a.resumeSummary)}</div>`:""}</td>
     <td class="num">${a.totalYrs!==""?esc(a.totalYrs)+" yrs":"—"}<div class="small">${a.b2cYrs!=null?"B2C "+esc(a.b2cYrs)+"y":""}</div></td>
     <td class="num"><input class="mini" data-ctc="${i}" data-k="currentCtc" value="${esc(a.currentCtc)}" aria-label="Current CTC"> <span class="small">→</span> <input class="mini" data-ctc="${i}" data-k="expectedCtc" value="${esc(a.expectedCtc)}" aria-label="Expected CTC"></td>
     <td><span class="pill v-${x.v}">${VLABEL[x.v]}</span></td></tr>`;};
@@ -1015,17 +1053,19 @@ function renderReview(){
     <div class="row" style="justify-content:space-between"><div><b>${its.length} applicant${its.length>1?"s":""} found</b> <span class="muted">· ${el.length} eligible · ${nl.length} not eligible${dupN?` · ${dupN} already in your list`:""}</span></div>
       ${canDeep?`<button class="btn sm" id="impDeep" ${imp.busy?"disabled":""}>Read resumes with Claude</button>`:""}</div>
     ${canDeep&&!imp.busy?`<div class="note">Scores so far come from the sheet only. "Read resumes with Claude" opens each selected person's Drive resume to check title, B2C years and commerce work, which can move them between lists.</div>`:""}
-    ${prog}${imp.err?`<div class="note err">${esc(imp.err)}</div>`:""}
+    ${prog}${imp.info&&!imp.busy?`<div class="note">${esc(imp.info)}</div>`:""}${imp.err?`<div class="note err">${esc(imp.err)}</div>`:""}
     <div class="rgroup"><div class="rgh"><h3><span class="dot d-strong"></span>Eligible <span class="muted num" style="font-weight:600">${el.length}</span></h3><button class="linkbtn" data-all="el">Select all</button></div>${el.length?table(el):`<div class="empty" style="padding:20px">No one passes the hard filters.</div>`}</div>
     <div class="rgroup"><div class="rgh"><h3><span class="dot d-excluded"></span>Not eligible <span class="muted num" style="font-weight:600">${nl.length}</span></h3><button class="linkbtn" data-all="nl">Select all</button></div>${nl.length?table(nl):`<div class="empty" style="padding:20px">Everyone passes.</div>`}</div>`;
   F.innerHTML=`<button class="btn" id="impBack" ${imp.busy?"disabled":""}>← Start over</button>
     <div class="row">${imp.busy?`<button class="btn" id="impStop">Stop</button>`:""}<span class="kbd">${selN} selected</span><button class="btn primary" id="impMerge" ${selN&&!imp.busy?"":"disabled"}>Add ${selN} to list</button></div>`;
 }
 function markDups(list){const byEmail=new Map(cands.filter(c=>c.email).map(c=>[c.email.toLowerCase().trim(),c]));
+  const p10=v=>String(v||"").replace(/\D/g,"").slice(-10);const byPhone=new Map(cands.filter(c=>p10(c.phone).length===10).map(c=>[p10(c.phone),c]));
   const byName=new Map(cands.map(c=>[(c.name+"|"+c.company).toLowerCase(),c]));
   const seen=new Set();const out=[];
   for(const a of list){const k=(a.email||a.name+"|"+a.company).toLowerCase().trim();if(seen.has(k)){const prev=out.find(x=>(x.email||x.name+"|"+x.company).toLowerCase().trim()===k);Object.assign(prev,a);continue;}seen.add(k);
-    const d=(a.email&&byEmail.get(a.email.toLowerCase().trim()))||byName.get((a.name+"|"+a.company).toLowerCase());if(d){a._dupOf=d.id;if(d.resumeChecked&&!a.resumeChecked){["role","domain","ecomYrs","brandTier","flows","impact","pastCompanies","resumeSummary","redFlags","b2cYrs","b2cCompanies","b2cUncertain","resumeChecked","resumeYrs","mobileScale","designSystem","totalYrs"].forEach(k=>{if(d[k]!=null)a[k]=d[k];});}["craft","process","status"].forEach(k=>{if(d[k])a[k]=d[k];});}a._sel=!excluded(a);out.push(a);}
+    const d=(a.email&&byEmail.get(a.email.toLowerCase().trim()))||(p10(a.phone).length===10&&byPhone.get(p10(a.phone)))||byName.get((a.name+"|"+a.company).toLowerCase());if(d&&a._local){const keepNote=a.notes;for(const k of Object.keys(d)){const v=d[k];if(k==="id"||v==null||v===""||(Array.isArray(v)&&!v.length))continue;a[k]=v;}if(!/resume file/.test(a.notes||""))a.notes=((a.notes||"")+" "+keepNote).trim();}
+    if(d){a._dupOf=d.id;if(d.resumeChecked&&!a.resumeChecked){["role","domain","ecomYrs","brandTier","flows","impact","pastCompanies","resumeSummary","redFlags","b2cYrs","b2cCompanies","b2cUncertain","resumeChecked","resumeYrs","mobileScale","designSystem","totalYrs"].forEach(k=>{if(d[k]!=null)a[k]=d[k];});}["craft","process","status"].forEach(k=>{if(d[k])a[k]=d[k];});}a._sel=!excluded(a);out.push(a);}
   return out;}
 async function processInput(){
   imp.err="";const mode=imp.mode;
@@ -1045,6 +1085,18 @@ async function processInput(){
       const hdr=looksHeader(rows[0]);const m=hdr?headerMap(rows[0]):guessMap(rows);const list=(hdr?rows.slice(1):rows).map(r=>rowToApplicant(r,m)).filter(Boolean);
       if(!list.length){imp.err="Couldn't find names in that sheet. Make sure it has a Name column.";return renderImp();}
       imp.items=markDups(list);return renderImp();}
+    if(mode==="resume"&&!(await getSample())){const files=(imp.files&&imp.files.length?imp.files:[imp.file]).filter(Boolean);
+      imp.busy=true;const list=[],bad=[];
+      for(let i=0;i<files.length;i++){const f=files[i];imp.prog={t:`Reading ${f.name}…`,n:`${i+1} of ${files.length}`,p:Math.round(i/files.length*100)};renderImp();
+        try{pdfText.links=[];const text=/\.txt$/i.test(f.name)?await f.text():await pdfText(f);
+          if(text.replace(/\s/g,"").length<200){bad.push(f.name);continue;}
+          const a=parseResumeLocal(text,f.name,pdfText.links);if(!a.name&&!a.email){bad.push(f.name);continue;}list.push(a);}
+        catch(e){if(e&&e.message==="load")throw e;bad.push(f.name);}}
+      imp.busy=false;imp.prog=null;
+      if(!list.length){imp.err="Couldn't read text from "+(bad.length>1?"these PDFs":"this PDF")+" (it may be a scanned image). Try pasting the details instead.";return renderImp();}
+      imp.items=markDups(list);
+      imp.err=bad.length?`Couldn't read ${bad.join(", ")} (scanned image?).`:"";imp.info="Details were pulled from the resume text: check the name, company and portfolio, and add CTC below.";
+      return renderImp();}
     if(mode==="resume"){imp.busy=true;imp.prog={t:"Extracting text from the PDF…",p:15};renderImp();
       const text=/\.txt$/i.test(imp.file.name)?await imp.file.text():await pdfText(imp.file);
       if(text.replace(/\s/g,"").length<200){imp.busy=false;imp.prog=null;imp.err="Couldn't read text from this PDF (it may be a scanned image). Try pasting the resume text instead.";return renderImp();}
@@ -1090,7 +1142,7 @@ async function mergeSelected(){
     imp.prog={t:"Adding to your list…",n:`${done+1} of ${sel.length}`,p:Math.round(done/sel.length*100)};renderReview();
     const ex=a._dupOf&&cands.find(c=>c.id===a._dupOf);
     const id=ex?ex.id:("u-"+String(a.name||"x").toLowerCase().replace(/[^a-z0-9]+/g,"-").slice(0,30)+"-"+Math.random().toString(36).slice(2,7));
-    const body={...(ex||{}),...a};delete body._sel;delete body._dupOf;delete body.id;
+    const body={...(ex||{}),...a};delete body._sel;delete body._dupOf;delete body._local;delete body.id;
     if(ex){["status","craft","process","notes"].forEach(k=>{if(ex[k]&&(k!=="notes"||!a.resumeChecked))body[k]=ex[k];});if(!a.resumeChecked&&ex.resumeChecked){["role","domain","ecomYrs","brandTier","flows","impact","pastCompanies","resumeSummary","b2cYrs","b2cCompanies","b2cUncertain","resumeChecked","mobileScale","designSystem","totalYrs"].forEach(k=>{if(ex[k]!=null)body[k]=ex[k];});}}
     body.batch=body.batch||"Added "+new Date().toLocaleDateString("en-IN",{day:"numeric",month:"short"});
     try{await writeDoc(id,clean({id,...body}));}catch(e){fail++;}
@@ -1101,25 +1153,25 @@ async function mergeSelected(){
   vfilter="all";renderList();
 }
 $("#impBody").addEventListener("click",e=>{
-  const m=e.target.closest("[data-mode]");if(m&&!imp.busy){imp.mode=m.dataset.mode;imp.file=null;imp.err="";renderImp();return;}
+  const m=e.target.closest("[data-mode]");if(m&&!imp.busy){imp.mode=m.dataset.mode;imp.file=null;imp.files=[];imp.err="";renderImp();return;}
   const all=e.target.closest("[data-all]");if(all){const want=all.dataset.all==="el";const grp=imp.items.filter(a=>excluded(a)!==want);const on=!grp.every(a=>a._sel);grp.forEach(a=>a._sel=on);renderReview();return;}
   if(e.target.id==="impDeep")deepRead();
 });
 $("#impBody").addEventListener("input",e=>{if(e.target.id==="impPaste")imp.paste=e.target.value;
   if(e.target.dataset.ctc!=null){const a=imp.items[+e.target.dataset.ctc];a[e.target.dataset.k]=e.target.value.trim();}});
 $("#impBody").addEventListener("change",e=>{
-  if(e.target.id==="impFile"){imp.file=e.target.files[0]||null;imp.err="";renderImp();return;}
+  if(e.target.id==="impFile"){imp.files=[...e.target.files];imp.file=imp.files[0]||null;imp.err="";renderImp();return;}
   if(e.target.dataset.i!=null){imp.items[+e.target.dataset.i]._sel=e.target.checked;renderReview();return;}
-  if(e.target.dataset.ctc!=null){const a=imp.items[+e.target.dataset.ctc];a._sel=!excluded(a);renderReview();}
+  if(e.target.dataset.ctc!=null){const a=imp.items[+e.target.dataset.ctc];if(e.target.dataset.k==="company"){a.domain=guessDomain(a.company)||a.domain;a.brandTier=guessBrand(a.company)||a.brandTier;}if(e.target.dataset.k==="portfolio"&&a.portfolio&&!/^https?:/i.test(a.portfolio))a.portfolio="https://"+a.portfolio;a._sel=!excluded(a);renderReview();}
 });
 $("#impBody").addEventListener("dragover",e=>{const d=e.target.closest("#impDrop");if(d){e.preventDefault();d.classList.add("over");}});
 $("#impBody").addEventListener("dragleave",e=>{const d=e.target.closest("#impDrop");if(d)d.classList.remove("over");});
-$("#impBody").addEventListener("drop",e=>{const d=e.target.closest("#impDrop");if(!d)return;e.preventDefault();imp.file=e.dataTransfer.files[0]||null;imp.err="";renderImp();});
+$("#impBody").addEventListener("drop",e=>{const d=e.target.closest("#impDrop");if(!d)return;e.preventDefault();imp.files=[...e.dataTransfer.files];imp.file=imp.files[0]||null;imp.err="";renderImp();});
 $("#impFoot").addEventListener("click",e=>{
   const id=e.target.id;
   if(id==="impGo")processInput();
   else if(id==="impStop"){imp.ctl?.abort();}
-  else if(id==="impBack"){imp.items=[];imp.err="";renderImp();}
+  else if(id==="impBack"){imp.items=[];imp.err="";imp.info="";renderImp();}
   else if(id==="impMerge")mergeSelected();
   else if(id==="impManual"){closeImport();showTab("cands");sel="new";draft=blank();draft.source="Application form";dirty=false;confirmDel=false;renderList();renderSheet();scrollSheet();setTimeout(()=>$("#f-name")?.focus(),0);}
 });
